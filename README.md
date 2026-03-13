@@ -190,23 +190,51 @@ LLM_MODEL=llama3.1:8b
 EMBEDDER_MODEL=nomic-embed-text
 ```
 
+**Anthropic / 不支持 embedding 的 LLM**
+
+如果你的 LLM 端点不提供 embedding（如 Anthropic 官方 API、部分本地代理），需单独配置 Embedder：
+
+```env
+# LLM 用 Anthropic 兼容代理
+LLM_API_KEY=your-llm-key
+LLM_BASE_URL=http://your-proxy/v1
+LLM_MODEL=anthropic/claude-sonnet-4.6
+
+# Embedder 单独指向支持 embedding 的服务（SiliconFlow / OpenAI 均可）
+EMBEDDER_API_KEY=sk-xxx
+EMBEDDER_BASE_URL=https://api.siliconflow.cn/v1
+EMBEDDER_MODEL=BAAI/bge-m3
+```
+
 ---
 
 ## 本地开发
 
 ```bash
-# 启动 Neo4j
-docker run -d --name neo4j -p 7687:7687 -p 7474:7474 \
+# 1. 启动 Neo4j
+docker run -d --name neo4j --restart unless-stopped \
+  -p 7687:7687 -p 7474:7474 \
   -e NEO4J_AUTH=neo4j/password123 neo4j:5
 
-# 安装依赖
+# 2. 配置环境变量
+cp .env.example .env
+vim .env  # 填入 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+
+# 3. 安装依赖
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 启动开发服务器
+# 4. 启动开发服务器
 uvicorn main:app --reload
+
+# 或后台运行
+nohup .venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 > openzep.log 2>&1 &
 ```
+
+> **启动时的索引报错**：首次启动或 Neo4j 容器已存在数据时，日志中会出现 `EquivalentSchemaRuleAlreadyExists` 错误，这是 graphiti-core 在 Neo4j 5 上重复创建索引时的已知行为，**不影响服务正常运行**，可忽略。
+
+> **uvicorn 找不到**：如果直接运行 `uvicorn` 提示 command not found，请确保已激活 venv（`source .venv/bin/activate`），或使用完整路径 `.venv/bin/uvicorn`。
 
 ---
 
