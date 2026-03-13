@@ -91,7 +91,6 @@ client = ZepClient(
 ![Architecture](./docs/architecture.png)
 
 </div>
----
 
 ## API Endpoints
 
