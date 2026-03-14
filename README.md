@@ -84,6 +84,44 @@ client = ZepClient(
 
 ---
 
+## 实测验证：与 MiroFish 完整集成
+
+OpenZep 已通过与 [MiroFish](https://github.com/666ghj/MiroFish)（多智能体舆论模拟系统）的完整集成测试，验证了全链路兼容性。
+
+### 测试环境
+
+- **openzep** v0.2.0（本次修复版本）
+- **mirofish** latest，Docker 部署
+- **LLM**：Claude Opus 4.6（通过 OpenAI 兼容接口）
+- **Embedder**：BAAI/bge-m3（SiliconFlow）
+
+### 测试流程
+
+1. **图谱构建**：上传 48KB 种子文档，自动提取本体（10种实体类型 + 10种关系类型）
+2. **Episode 处理**：异步并行处理 68 个 episode，全部完成
+3. **图谱结果**：**161 节点，190 条边**，耗时 966 秒
+4. **多智能体模拟**：161 个 Agent 并行运行，Twitter + Reddit 双平台，**168 轮模拟**
+5. **总计交互**：**7000+ 次 Agent 行动**
+6. **报告生成**：基于模拟数据自动生成结构化预测报告
+
+### 截图
+
+<!-- 图谱可视化截图 -->
+<!-- 模拟运行截图 -->
+<!-- 报告截图 -->
+
+### 本次修复的关键兼容性问题
+
+| 问题 | 影响 | 修复方案 |
+|------|------|----------|
+| 仅支持 `Bearer` 鉴权格式 | mirofish 使用 `Api-Key` 格式，鉴权失败 | 同时支持两种格式 |
+| episode 同步处理导致超时 | 大批量 episode 处理超时，图谱构建失败 | 改为异步后台 + Semaphore 限流 + 进度轮询 |
+| 节点缺少自定义 label | 实体类型过滤返回 0 个实体，模拟无法启动 | 自动补充 `ExtractedEntity` label |
+| 空图谱查询抛出异常 | 初始化阶段报错 | 捕获异常返回空列表 |
+| `EpisodeResponse` 缺少 `processed` 字段 | mirofish 轮询状态卡死 | 添加 `processed: bool = True` |
+
+---
+
 ## Architecture
 
 <div align="center">
