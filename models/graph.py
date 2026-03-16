@@ -49,6 +49,7 @@ class EntityTypesRequest(BaseModel):
     entity_types: list[Any] = []
     edge_types: list[Any] = []
     graph_ids: list[str] = []
+    user_ids: list[str] = []
 
 
 class GraphSearchRequest(BaseModel):

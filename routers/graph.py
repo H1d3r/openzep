@@ -29,6 +29,7 @@ from models.graph import (
     NodeListResponse,
     NodeResponse,
 )
+from ontology_registry import get_ontology, set_ontology as store_ontology
 
 router = APIRouter(prefix="/api/v2", tags=["graph"], dependencies=[Depends(verify_api_key)])
 
@@ -38,6 +39,7 @@ router = APIRouter(prefix="/api/v2", tags=["graph"], dependencies=[Depends(verif
 @router.post("/graph")
 async def graph_add(body: GraphAddRequest, request: Request):
     graphiti = get_graphiti(request)
+    ontology = get_ontology(graph_id=body.graph_id, user_id=body.user_id)
     name = await add_single_episode(
         graphiti,
         graph_id=body.graph_id,
@@ -45,6 +47,9 @@ async def graph_add(body: GraphAddRequest, request: Request):
         ep_type=body.type,
         source_description=body.source_description,
         created_at=body.created_at,
+        entity_types=ontology.entity_types if ontology else None,
+        edge_types=ontology.edge_types if ontology else None,
+        edge_type_map=ontology.edge_type_map if ontology else None,
     )
     return {"uuid": name, "graph_id": body.graph_id}
 
@@ -70,6 +75,7 @@ async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
     import uuid as _uuid
     _log = _logging.getLogger(__name__)
     graphiti = get_graphiti(request)
+    ontology = get_ontology(graph_id=body.graph_id, user_id=body.user_id)
     now = datetime.now(timezone.utc)
 
     # Generate fake uuids and mark them as pending
@@ -91,7 +97,16 @@ async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
     async def _process():
         async with _get_processing_sem():
             try:
-                await graphiti.add_episode_bulk(raw_episodes, group_id=body.graph_id)
+                if ontology:
+                    await graphiti.add_episode_bulk(
+                        raw_episodes,
+                        group_id=body.graph_id,
+                        entity_types=ontology.entity_types,
+                        edge_types=ontology.edge_types,
+                        edge_type_map=ontology.edge_type_map,
+                    )
+                else:
+                    await graphiti.add_episode_bulk(raw_episodes, group_id=body.graph_id)
                 _log.info(f'add_episode_bulk done: {body.graph_id} ({len(raw_episodes)} eps)')
             except Exception as e:
                 _log.error(f'add_episode_bulk failed for {body.graph_id}: {e}', exc_info=True)
@@ -99,7 +114,16 @@ async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
                 await asyncio.sleep(5)
                 try:
                     _log.info(f'Retrying add_episode_bulk for {body.graph_id}...')
-                    await graphiti.add_episode_bulk(raw_episodes, group_id=body.graph_id)
+                    if ontology:
+                        await graphiti.add_episode_bulk(
+                            raw_episodes,
+                            group_id=body.graph_id,
+                            entity_types=ontology.entity_types,
+                            edge_types=ontology.edge_types,
+                            edge_type_map=ontology.edge_type_map,
+                        )
+                    else:
+                        await graphiti.add_episode_bulk(raw_episodes, group_id=body.graph_id)
                     _log.info(f'Retry succeeded for {body.graph_id}')
                 except Exception as e2:
                     _log.error(f'Retry also failed for {body.graph_id}: {e2}')
@@ -121,11 +145,17 @@ async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
     ]
 
 
-# ── graph.set-ontology (no-op compat) ────────────────────────────────────────
+# ── graph.set-ontology compat ────────────────────────────────────────────────
 
 @router.post("/graph/set-ontology")
-async def graph_set_ontology(request: Request):
-    # OpenZep/Graphiti does not support custom ontologies; accept and ignore.
+async def graph_set_ontology(body: EntityTypesRequest | None = None):
+    if body is not None:
+        store_ontology(
+            graph_ids=body.graph_ids,
+            user_ids=body.user_ids,
+            entity_types=body.entity_types,
+            edge_types=body.edge_types,
+        )
     return {"success": True}
 
 
@@ -366,4 +396,16 @@ async def delete_graph(graph_id: str, request: Request):
 
 @router.put("/entity-types")
 async def set_entity_types(body: EntityTypesRequest):
-    return {"message": "ok"}
+    compiled = store_ontology(
+        graph_ids=body.graph_ids,
+        user_ids=body.user_ids,
+        entity_types=body.entity_types,
+        edge_types=body.edge_types,
+    )
+    return {
+        "message": "ok",
+        "graph_ids": body.graph_ids,
+        "user_ids": body.user_ids,
+        "entity_type_count": len(compiled.entity_types),
+        "edge_type_count": len(compiled.edge_types),
+    }

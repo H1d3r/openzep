@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from typing import Any
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,9 @@ async def add_single_episode(
     ep_type: str = "text",
     source_description: str = "user",
     created_at: datetime | None = None,
+    entity_types: dict[str, type[BaseModel]] | None = None,
+    edge_types: dict[str, type[BaseModel]] | None = None,
+    edge_type_map: dict[tuple[str, str], list[str]] | None = None,
 ) -> str:
     """Add a single episode to the graph, return its name."""
     ref_time = created_at or datetime.now(timezone.utc)
@@ -71,6 +75,9 @@ async def add_single_episode(
         reference_time=ref_time,
         source=source,
         group_id=graph_id,
+        entity_types=entity_types,
+        edge_types=edge_types,
+        edge_type_map=edge_type_map,
     )
     return name
 
