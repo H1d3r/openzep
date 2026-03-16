@@ -1,15 +1,17 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from graphiti_core.edges import EntityEdge
 from graphiti_core.errors import GroupsEdgesNotFoundError, GroupsNodesNotFoundError
+from graphiti_core.llm_client.errors import RateLimitError
 from graphiti_core.nodes import EntityNode, EpisodicNode
 from graphiti_core.utils.bulk_utils import RawEpisode
+import openai
 
 from deps import get_graphiti, verify_api_key
 from engine.data_ingestion import normalize_episode_body, normalize_episode_type
-from engine.graphiti_engine import add_single_episode
 from models.graph import (
     EdgeListByGraphRequest,
     EdgeListResponse,
@@ -32,6 +34,7 @@ from models.graph import (
 from ontology_registry import get_ontology, set_ontology as store_ontology
 
 router = APIRouter(prefix="/api/v2", tags=["graph"], dependencies=[Depends(verify_api_key)])
+logger = logging.getLogger(__name__)
 
 
 # ── graph.add ─────────────────────────────────────────────────────────────────
@@ -58,22 +61,161 @@ async def graph_add(body: GraphAddRequest, request: Request):
 # Maps fake episode uuid -> True (processed) / False (pending)
 _episode_status: dict[str, bool] = {}
 _processing_sem: asyncio.Semaphore | None = None
+_MAX_CONCURRENT_BATCHES = 2
+_MAX_BULK_RETRIES = 2
+_MAX_SINGLE_RETRIES = 2
+_BULK_TIMEOUT_SECONDS = 45
+_SINGLE_TIMEOUT_SECONDS = 30
 
 
 def _get_processing_sem() -> asyncio.Semaphore:
     global _processing_sem
     if _processing_sem is None:
-        _processing_sem = asyncio.Semaphore(2)  # 2 concurrent batches max
+        _processing_sem = asyncio.Semaphore(_MAX_CONCURRENT_BATCHES)
     return _processing_sem
+
+
+def _build_bulk_kwargs(body: GraphAddBatchRequest, ontology):
+    kwargs = {"group_id": body.graph_id}
+    if ontology:
+        kwargs.update(
+            entity_types=ontology.entity_types,
+            edge_types=ontology.edge_types,
+            edge_type_map=ontology.edge_type_map,
+        )
+    return kwargs
+
+
+def _is_retryable_bulk_error(exc: Exception) -> bool:
+    if isinstance(exc, RateLimitError | openai.RateLimitError):
+        return True
+    if isinstance(exc, openai.InternalServerError):
+        message = str(exc).lower()
+        return "429" in message or "rate limit" in message
+
+    message = str(exc).lower()
+    return "rate limit" in message or "429" in message or "too many requests" in message
+
+
+async def _add_raw_episode(
+    graphiti,
+    body: GraphAddBatchRequest,
+    raw_episode: RawEpisode,
+    ontology,
+):
+    await graphiti.add_episode(
+        name=raw_episode.name,
+        episode_body=raw_episode.content,
+        source_description=raw_episode.source_description or "",
+        reference_time=raw_episode.reference_time,
+        source=raw_episode.source,
+        **_build_bulk_kwargs(body, ontology),
+    )
+
+
+async def _add_episode_bulk_resilient(
+    graphiti,
+    body: GraphAddBatchRequest,
+    raw_episodes: list[RawEpisode],
+    ontology,
+    *,
+    attempt: int = 1,
+) -> None:
+    try:
+        await asyncio.wait_for(
+            graphiti.add_episode_bulk(raw_episodes, **_build_bulk_kwargs(body, ontology)),
+            timeout=_BULK_TIMEOUT_SECONDS,
+        )
+        logger.info("add_episode_bulk done: %s (%s eps)", body.graph_id, len(raw_episodes))
+        return
+    except Exception as exc:
+        retryable = _is_retryable_bulk_error(exc)
+        timed_out = isinstance(exc, TimeoutError)
+        if retryable and attempt < _MAX_BULK_RETRIES:
+            delay = attempt * 2
+            logger.warning(
+                "add_episode_bulk retrying for %s (%s eps, attempt %s/%s) after %ss: %s",
+                body.graph_id,
+                len(raw_episodes),
+                attempt + 1,
+                _MAX_BULK_RETRIES,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+            await _add_episode_bulk_resilient(
+                graphiti,
+                body,
+                raw_episodes,
+                ontology,
+                attempt=attempt + 1,
+            )
+            return
+
+        if len(raw_episodes) > 1:
+            midpoint = len(raw_episodes) // 2
+            logger.warning(
+                "add_episode_bulk splitting batch for %s after %s (%s eps -> %s + %s): %s",
+                body.graph_id,
+                "timeout" if timed_out else "failure",
+                len(raw_episodes),
+                midpoint,
+                len(raw_episodes) - midpoint,
+                exc,
+            )
+            await _add_episode_bulk_resilient(
+                graphiti,
+                body,
+                raw_episodes[:midpoint],
+                ontology,
+            )
+            await _add_episode_bulk_resilient(
+                graphiti,
+                body,
+                raw_episodes[midpoint:],
+                ontology,
+            )
+            return
+
+        raw_episode = raw_episodes[0]
+        for single_attempt in range(1, _MAX_SINGLE_RETRIES + 1):
+            try:
+                await asyncio.wait_for(
+                    _add_raw_episode(graphiti, body, raw_episode, ontology),
+                    timeout=_SINGLE_TIMEOUT_SECONDS,
+                )
+                logger.info("add_episode single fallback done: %s (%s)", body.graph_id, raw_episode.name)
+                return
+            except Exception as single_exc:
+                if _is_retryable_bulk_error(single_exc) and single_attempt < _MAX_SINGLE_RETRIES:
+                    delay = single_attempt * 2
+                    logger.warning(
+                        "single episode retrying for %s (%s, attempt %s/%s) after %ss: %s",
+                        body.graph_id,
+                        raw_episode.name,
+                        single_attempt + 1,
+                        _MAX_SINGLE_RETRIES,
+                        delay,
+                        single_exc,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                logger.error(
+                    "single episode fallback failed for %s (%s): %s",
+                    body.graph_id,
+                    raw_episode.name,
+                    single_exc,
+                    exc_info=True,
+                )
+                return
 
 
 # ── graph.add_batch ───────────────────────────────────────────────────────────
 
 @router.post("/graph-batch")
 async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
-    import logging as _logging
     import uuid as _uuid
-    _log = _logging.getLogger(__name__)
     graphiti = get_graphiti(request)
     ontology = get_ontology(graph_id=body.graph_id, user_id=body.user_id)
     now = datetime.now(timezone.utc)
@@ -97,36 +239,9 @@ async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
     async def _process():
         async with _get_processing_sem():
             try:
-                if ontology:
-                    await graphiti.add_episode_bulk(
-                        raw_episodes,
-                        group_id=body.graph_id,
-                        entity_types=ontology.entity_types,
-                        edge_types=ontology.edge_types,
-                        edge_type_map=ontology.edge_type_map,
-                    )
-                else:
-                    await graphiti.add_episode_bulk(raw_episodes, group_id=body.graph_id)
-                _log.info(f'add_episode_bulk done: {body.graph_id} ({len(raw_episodes)} eps)')
-            except Exception as e:
-                _log.error(f'add_episode_bulk failed for {body.graph_id}: {e}', exc_info=True)
-                # Wait before retry to let rate limit recover
-                await asyncio.sleep(5)
-                try:
-                    _log.info(f'Retrying add_episode_bulk for {body.graph_id}...')
-                    if ontology:
-                        await graphiti.add_episode_bulk(
-                            raw_episodes,
-                            group_id=body.graph_id,
-                            entity_types=ontology.entity_types,
-                            edge_types=ontology.edge_types,
-                            edge_type_map=ontology.edge_type_map,
-                        )
-                    else:
-                        await graphiti.add_episode_bulk(raw_episodes, group_id=body.graph_id)
-                    _log.info(f'Retry succeeded for {body.graph_id}')
-                except Exception as e2:
-                    _log.error(f'Retry also failed for {body.graph_id}: {e2}')
+                await _add_episode_bulk_resilient(graphiti, body, raw_episodes, ontology)
+            except Exception as exc:
+                logger.error("add_episode_bulk failed for %s: %s", body.graph_id, exc, exc_info=True)
             finally:
                 for uid in ep_uuids:
                     _episode_status[uid] = True

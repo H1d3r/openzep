@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from typing import get_origin
 from typing import Any
 
 import openai
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 class CompatOpenAIGenericClient(OpenAIGenericClient):
     """OpenAI-compatible client with tolerant JSON extraction for loose proxies."""
+
+    @staticmethod
+    def _is_list_field(response_model: type[BaseModel], field_name: str) -> bool:
+        field = response_model.model_fields[field_name]
+        return get_origin(field.annotation) is list
 
     @staticmethod
     def _extract_json_text(raw: str) -> str:
@@ -57,10 +63,18 @@ class CompatOpenAIGenericClient(OpenAIGenericClient):
         if response_model is None:
             return payload
 
-        if isinstance(payload, list):
-            field_names = list(response_model.model_fields.keys())
-            if len(field_names) == 1:
-                payload = {field_names[0]: payload}
+        field_names = list(response_model.model_fields.keys())
+        if len(field_names) == 1:
+            field_name = field_names[0]
+            expects_list = CompatOpenAIGenericClient._is_list_field(response_model, field_name)
+
+            if isinstance(payload, list):
+                payload = {field_name: payload}
+            elif expects_list and isinstance(payload, dict):
+                if field_name not in payload:
+                    payload = {field_name: [payload]}
+                elif isinstance(payload[field_name], dict):
+                    payload = {**payload, field_name: [payload[field_name]]}
 
         if (
             response_model.__name__ == "ExtractedEntities"
