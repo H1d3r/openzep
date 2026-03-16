@@ -6,9 +6,9 @@ from graphiti_core.edges import EntityEdge
 from graphiti_core.errors import GroupsEdgesNotFoundError, GroupsNodesNotFoundError
 from graphiti_core.nodes import EntityNode, EpisodicNode
 from graphiti_core.utils.bulk_utils import RawEpisode
-from graphiti_core.utils.maintenance.graph_data_operations import EpisodeType
 
 from deps import get_graphiti, verify_api_key
+from engine.data_ingestion import normalize_episode_body, normalize_episode_type
 from engine.graphiti_engine import add_single_episode
 from models.graph import (
     EdgeListByGraphRequest,
@@ -86,9 +86,9 @@ async def graph_add_batch(body: GraphAddBatchRequest, request: Request):
     raw_episodes = [
         RawEpisode(
             name=ep.name or f"ep_{body.graph_id}_{i}",
-            content=ep.effective_content,
+            content=normalize_episode_body(ep.effective_content, ep.type),
             source_description=ep.source_description,
-            source=EpisodeType.message,
+            source=normalize_episode_type(ep.type),
             reference_time=ep.created_at or ep.reference_time or now,
         )
         for i, ep in enumerate(body.episodes)

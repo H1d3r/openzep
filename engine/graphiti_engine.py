@@ -17,6 +17,7 @@ from graphiti_core.nodes import EpisodeType
 from engine.compat_embedder import CompatOpenAIEmbedder
 from config import Settings
 from engine.compat_openai_client import CompatOpenAIGenericClient
+from engine.data_ingestion import normalize_episode_body, normalize_episode_type
 
 
 def create_graphiti(s: Settings) -> Graphiti:
@@ -65,13 +66,11 @@ async def add_single_episode(
     """Add a single episode to the graph, return its name."""
     ref_time = created_at or datetime.now(timezone.utc)
     name = f"ep_{graph_id}_{ref_time.timestamp()}"
-    try:
-        source = EpisodeType(ep_type)
-    except ValueError:
-        source = EpisodeType.text
+    source = normalize_episode_type(ep_type)
+    episode_body = normalize_episode_body(data, ep_type)
     await graphiti.add_episode(
         name=name,
-        episode_body=data,
+        episode_body=episode_body,
         source_description=source_description,
         reference_time=ref_time,
         source=source,
