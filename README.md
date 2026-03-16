@@ -49,17 +49,18 @@
 git clone https://github.com/N1nEmAn/openzep.git
 cd openzep
 
-# 2. 配置
-cp .env.example .env
-vim .env  # 填入 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
+# 2. 运行 Docker 安装脚本
+bash setup_docker.sh
 
-# 3. 启动
-docker compose up -d
-
-# 4. 验证
+# 3. 验证
 curl http://localhost:8000/healthz
 # {"status": "ok"}
 ```
+
+这个脚本会自动处理 Docker 场景下的地址问题。
+如果你填的是宿主机上的本地网关或代理，例如 `http://localhost:11434/v1` 或 `http://127.0.0.1:8080/v1`，脚本会在写入 `.env` 时自动改成 `http://host.docker.internal:...`，避免容器内无法访问宿主机服务。
+
+> `docker-compose.yml` 也已内置 `host.docker.internal:host-gateway`，用于 Linux 下访问宿主机。
 
 ### 最简配置（仅三行）
 

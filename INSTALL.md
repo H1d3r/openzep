@@ -27,6 +27,22 @@ bash install_mirofish.sh
 
 不需要手动把 `from zep_python import ZepClient` 粘贴到 MiroFish 的任何源码文件里。
 
+## Docker 部署
+
+如果你使用 Docker 运行 OpenZep，建议直接执行：
+
+```bash
+bash setup_docker.sh
+```
+
+脚本会自动处理 Docker 场景下的 `.env`：
+
+- `LLM_BASE_URL=http://localhost:...` 会自动改成 `http://host.docker.internal:...`
+- `EMBEDDER_BASE_URL=http://127.0.0.1:...` 也会自动改成容器可访问的地址
+- 然后再执行 `docker compose up -d --build`
+
+这可以避免容器里访问不到宿主机代理、Ollama、one-api、new-api 等本地服务。
+
 ## 脚本说明
 
 `install_mirofish.sh`
